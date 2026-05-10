@@ -1,14 +1,39 @@
 package server
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"dp2codex/internal/admin"
 	"dp2codex/internal/cache"
 	"dp2codex/internal/handler"
 )
+
+var reqIDCounter atomic.Int64
+
+func nextReqID() string {
+	n := reqIDCounter.Add(1)
+	return fmt.Sprintf("%05d", n)
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.statusCode = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
 
 func NewHTTPServer(port string) *http.Server {
 	mux := http.NewServeMux()
@@ -41,10 +66,25 @@ func NewHTTPServer(port string) *http.Server {
 
 	slog.Info("HTTP server starting", "port", port)
 
-	// 日志中间件包装
+	// 日志中间件：请求ID + 耗时 + 状态码
 	logged := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		slog.Info("INCOMING", "method", r.Method, "path", r.URL.Path, "host", r.Host)
-		mux.ServeHTTP(w, r)
+		start := time.Now()
+		reqID := nextReqID()
+		rec := &statusRecorder{ResponseWriter: w, statusCode: 200}
+
+		slog.Info("REQ",
+			"id", reqID,
+			"method", r.Method,
+			"path", r.URL.Path,
+			"host", r.Host,
+		)
+		mux.ServeHTTP(rec, r)
+
+		slog.Info("RES",
+			"id", reqID,
+			"status", rec.statusCode,
+			"duration", time.Since(start).String(),
+		)
 	})
 
 	return &http.Server{

@@ -16,6 +16,24 @@ import (
 	"dp2codex/internal/stats"
 )
 
+func compactReq(data map[string]any) slog.Attr {
+	var items, tools int
+	if input, ok := data["input"].([]any); ok {
+		items = len(input)
+	}
+	if t, ok := data["tools"].([]any); ok {
+		tools = len(t)
+	}
+	model, _ := data["model"].(string)
+	stream, _ := data["stream"].(bool)
+	return slog.Group("req",
+		"model", model,
+		"stream", stream,
+		"input_items", items,
+		"tools", tools,
+	)
+}
+
 var reasoningCache = newReasoningCache()
 
 // ResponsesHTTP 处理 POST /v1/responses
@@ -30,12 +48,12 @@ func ResponsesHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
-		slog.Info("bad request body", "body", string(body))
+		slog.Info("bad request body", "body", stats.Sanitize(string(body)))
 		http.Error(w, `{"error":"invalid json"}`, 400)
 		stats.RecordError(400)
 		return
 	}
-	slog.Info("responses request FULL", "body", string(body))
+	slog.Info("responses", compactReq(data))
 
 	// 空 input 检查
 	input := data["input"]
