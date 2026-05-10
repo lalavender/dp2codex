@@ -3,10 +3,12 @@ package deepseek
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -24,48 +26,64 @@ func NewClient(baseURL, apiKey string) *Client {
 	if baseURL == "" {
 		baseURL = "https://api.deepseek.com"
 	}
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		httpClient: &http.Client{
-			Timeout: 300 * time.Second,
+			// 不设全局 Timeout，流式连接会被误杀
 			Transport: &http.Transport{
-				MaxIdleConns:    100,
-				MaxConnsPerHost: 20,
-				IdleConnTimeout: 90 * time.Second,
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					c, err := dialer.DialContext(ctx, network, addr)
+					if err != nil {
+						return nil, err
+					}
+					if tcp, ok := c.(*net.TCPConn); ok {
+						_ = tcp.SetNoDelay(true)
+					}
+					return c, nil
+				},
+				MaxIdleConns:          100,
+				MaxConnsPerHost:       20,
+				IdleConnTimeout:       90 * time.Second,
+				ResponseHeaderTimeout: 60 * time.Second, // 仅等待首个响应头
+				DisableCompression:    true,             // SSE 不需 gzip，减少缓冲延迟
 			},
 		},
 	}
 }
 
 type ChatResponse struct {
-	ID      string            `json:"id"`
-	Object  string            `json:"object"`
-	Created int64             `json:"created"`
-	Model   string            `json:"model"`
-	Choices []Choice          `json:"choices"`
-	Usage   *Usage            `json:"usage,omitempty"`
+	ID      string   `json:"id"`
+	Object  string   `json:"object"`
+	Created int64    `json:"created"`
+	Model   string   `json:"model"`
+	Choices []Choice `json:"choices"`
+	Usage   *Usage   `json:"usage,omitempty"`
 }
 
 type Choice struct {
-	Index        int              `json:"index"`
-	Message      Message          `json:"message,omitempty"`
-	Delta        Delta            `json:"delta,omitempty"`
-	FinishReason string           `json:"finish_reason,omitempty"`
+	Index        int     `json:"index"`
+	Message      Message `json:"message,omitempty"`
+	Delta        Delta   `json:"delta,omitempty"`
+	FinishReason string  `json:"finish_reason,omitempty"`
 }
 
 type Message struct {
-	Role              string     `json:"role"`
-	Content           string     `json:"content,omitempty"`
-	ReasoningContent  string     `json:"reasoning_content,omitempty"`
-	ToolCalls         []ToolCall `json:"tool_calls,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type Delta struct {
-	Role              string     `json:"role,omitempty"`
-	Content           string     `json:"content,omitempty"`
-	ReasoningContent  string     `json:"reasoning_content,omitempty"`
-	ToolCalls         []ToolCall `json:"tool_calls,omitempty"`
+	Role             string     `json:"role,omitempty"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type ToolCall struct {
@@ -125,6 +143,9 @@ func (c *Client) ChatStream(request map[string]any, source string, cb StreamCall
 	apiKey := config.Global.GetString("deepseek_key")
 
 	request["stream"] = true
+	// 请求在最后一个 chunk 中返回 usage 统计
+	request["stream_options"] = map[string]any{"include_usage": true}
+
 	requestURL := baseURL + "/v1/chat/completions"
 	reqBody, _ := json.Marshal(request)
 
@@ -147,19 +168,28 @@ func (c *Client) ChatStream(request map[string]any, source string, cb StreamCall
 		return fmt.Errorf("upstream %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 65536), 65536)
+	// ReadBytes 按行解析 SSE，避免 Scanner 额外拷贝；大行缓冲区减轻上游粘包延迟
+	br := bufio.NewReaderSize(resp.Body, 256*1024)
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
+	var lastUsage *Usage
+
+	for {
+		line, err := br.ReadBytes('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("stream read: %w", err)
+		}
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
 			continue
 		}
-		if !strings.HasPrefix(line, "data: ") {
+		if !bytes.HasPrefix(line, []byte("data: ")) {
 			continue
 		}
 
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimSpace(string(line[len("data: "):]))
 		if data == "[DONE]" {
 			break
 		}
@@ -178,6 +208,11 @@ func (c *Client) ChatStream(request map[string]any, source string, cb StreamCall
 			continue
 		}
 
+		// 保存 usage（可能在独立的最后一个 chunk 中）
+		if streamResp.Usage != nil {
+			lastUsage = streamResp.Usage
+		}
+
 		if len(streamResp.Choices) == 0 {
 			continue
 		}
@@ -187,8 +222,13 @@ func (c *Client) ChatStream(request map[string]any, source string, cb StreamCall
 
 		isLast := choice.FinishReason != ""
 		var usage *Usage
-		if isLast && streamResp.Usage != nil {
-			usage = streamResp.Usage
+		if isLast {
+			// 优先使用流式返回的 usage，其次使用之前保存的
+			if streamResp.Usage != nil {
+				usage = streamResp.Usage
+			} else {
+				usage = lastUsage
+			}
 		}
 
 		if cb != nil {
@@ -196,7 +236,7 @@ func (c *Client) ChatStream(request map[string]any, source string, cb StreamCall
 		}
 	}
 
-	return scanner.Err()
+	return nil
 }
 
 // Compact 调用 DeepSeek 压缩对话
@@ -208,7 +248,7 @@ func (c *Client) Compact(messages []map[string]any, source string) (string, erro
 			{"role": "system", "content": systemMsg},
 			{"role": "user", "content": messages},
 		},
-		"max_tokens": 2048,
+		"max_tokens":  2048,
 		"temperature": 0.3,
 	}
 

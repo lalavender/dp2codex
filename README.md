@@ -4,14 +4,7 @@
 
 ## 项目说明
 
-dp2codex 是一个本地 API 代理，运行四个服务：
-
-| 端口 | 协议 | 用途 |
-|------|------|------|
-| 9090 | HTTP | Codex Responses API + DeepSeek Chat API |
-| 8444 | HTTPS | TLS 劫持（无需配置环境变量） |
-| 8090 | HTTP | 管理面板（配置、统计、日志） |
-| 8443 | TCP | CONNECT 隧道代理 |
+dp2codex 是一个**命令行启动的本地 HTTP API 代理**（无 Web 管理界面）：将 Codex CLI 使用的 OpenAI Responses 协议转换为 DeepSeek Chat Completions，监听单个地址（默认 `:9090`）。
 
 ## 快速开始
 
@@ -22,22 +15,25 @@ cd dp2codex
 go build -o dp2codex .
 ```
 
-### 启动
+### 启动（必填一项：API Key）
 
 ```bash
+# 方式一：环境变量
 export DEEPSEEK_API_KEY=sk-your-key-here
 ./dp2codex
+
+# 方式二：第一个参数传入密钥（选项须写在参数前）
+./dp2codex sk-your-key-here
+./dp2codex -listen 127.0.0.1:9090 sk-your-key-here
 ```
 
-首次启动会自动生成 TLS 证书（`certs/` 目录），输出如下：
+日志默认写入平台数据目录下的 `logs/dp2codex.log`（如 macOS/Linux：`~/.dp2codex/logs/`），支持按大小轮转与按天数的保留清理；可通过环境变量覆盖（见下文）。
 
-```
-Proxy starting...
-certificates generated successfully
-HTTP server starting  port=9090
-Admin server starting  port=8090
-All servers started  http=:9090 https=:8444 admin=:8090 tunnel=:8443
-```
+### 后台部署（多平台）
+
+- **Linux systemd**：参考 `deploy/systemd/dp2codex.service`，用 `EnvironmentFile` 提供 `DEEPSEEK_API_KEY`，勿把密钥写进单元文件本身。
+- **macOS launchd**：参考 `deploy/launchd/io.dp2codex.plist`，在 `EnvironmentVariables` 中设置 `DEEPSEEK_API_KEY` 后 `launchctl load`。
+- **容器**：根目录 `Dockerfile`，运行时注入 `-e DEEPSEEK_API_KEY=...`，默认监听 `0.0.0.0:9090`。
 
 ## Codex CLI 配置方式
 
@@ -155,36 +151,27 @@ curl -X POST http://localhost:9090/v1/responses/compact \
   }' | jq .
 ```
 
-### 8. 管理面板
-
-启动后访问 http://localhost:8090 ，可直接在网页中：
-
-- 配置 DeepSeek API Key
-- 调整推理力度
-- 查看实时统计（请求数、缓存命中率、活跃流数）
-- 查看日志
-- 一键复制环境变量
-
 ## 配置说明
 
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `DEEPSEEK_API_KEY` | — | DeepSeek API 密钥 |
+| `DEEPSEEK_API_KEY` | — | DeepSeek API 密钥（与 CLI 第一个参数二选一） |
+| `DP2CODEX_LISTEN` | `:9090` | HTTP 监听地址 |
 | `DEEPSEEK_BASE` | `https://api.deepseek.com` | DeepSeek API 地址 |
 | `DEFAULT_MODEL` | `deepseek-v4-pro` | 默认模型名 |
+| `DP2CODEX_LOG_DIR` | 平台默认数据目录下 `logs` | 日志目录 |
+| `DP2CODEX_LOG_MAX_MB` | `10` | 单文件上限(MB)，超出后轮转 |
+| `DP2CODEX_LOG_MAX_FILES` | `5` | 轮转保留的历史文件个数策略 |
+| `DP2CODEX_LOG_MAX_AGE_DAYS` | `7` | 超过该天数的日志文件会被删除 |
 | `REASONING_EFFORT` | `high` | 推理力度 (low/medium/high) |
 | `MAX_POSITION_EMBEDDINGS` | `272000` | 上下文窗口大小 |
 | `MAX_OUTPUT_TOKENS` | `65536` | 最大输出 token 数 |
 | `ENABLE_REASONING_CACHE` | `true` | 启用推理缓存 |
 | `REASONING_CACHE_TTL` | `300` | 缓存有效期（秒） |
-| `WEB_FETCH_MAX_URLS` | `5` | 每轮预取最大 URL 数 |
-| `WEB_FETCH_TIMEOUT` | `15` | 预取超时（秒） |
 
-### 运行时配置
-
-访问管理面板 http://localhost:8090 可实时修改以上配置。修改后即时生效，无需重启。
+可选配置文件仍为 `~/.dp2codex/config.json`（模型映射等）；**API Key 建议仅用参数或 `DEEPSEEK_API_KEY` 注入**，勿提交到仓库。
 
 ## 常见问题
 
@@ -219,10 +206,8 @@ Codex CLI → POST /v1/responses (OpenAI Responses 格式)
 功能串联：
 - 模型映射 (gpt-5.5 → deepseek-v4-pro)
 - 推理缓存（跨轮次 thinking 连续性）
-- URL 预取 + SSRF 防护
 - 多 tool call 合并
 - tool 消息排序修复
-- 对话压缩
 ```
 
 ### SSE 事件格式
@@ -239,46 +224,22 @@ response.output_item.done   → 输出项完成
 response.completed     → 响应完成
 ```
 
-## HTTPS 劫持模式
-
-### 端口转发（macOS）
-
-```bash
-sudo sysctl -w net.inet.ip.forwarding=1
-echo "rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port 8444" | sudo pfctl -ef -
-```
-
-### hosts 配置
+## 项目文件结构（节选）
 
 ```
-127.0.0.1 api.openai.com
-```
-
-### 验证
-
-```bash
-curl -k https://localhost:8444/v1/health
-curl -k https://api.openai.com/v1/models
-```
-
-## 项目文件结构
-
-```
-├── main.go                     # 入口
+├── main.go
+├── Dockerfile
+├── deploy/
+│   ├── systemd/dp2codex.service
+│   └── launchd/io.dp2codex.plist
 ├── internal/
-│   ├── config/                 # 运行时配置
-│   ├── cert/                   # TLS 证书生成
-│   ├── protocol/               # 协议转换（核心）
-│   ├── handler/                # HTTP 路由处理器
-│   ├── deepseek/               # DeepSeek API 客户端
-│   ├── cache/                  # 推理缓存（Redis + 内存）
-│   ├── web/                    # URL 预取 & SSRF 防护
-│   ├── stats/                  # 统计 & 日志
-│   ├── server/                 # 多服务器管理
-│   └── admin/                  # 管理面板
-├── docs/
-│   ├── plan.md                 # 项目计划
-│   ├── todo.md                 # 待办
-│   └── finish.md               # 已完成
-└── README.md
+│   ├── config/
+│   ├── protocol/
+│   ├── handler/
+│   ├── deepseek/
+│   ├── cache/
+│   ├── stats/
+│   ├── logging/
+│   └── server/
+└── docs/
 ```

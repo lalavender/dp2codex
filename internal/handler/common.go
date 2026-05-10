@@ -4,11 +4,22 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"dp2codex/internal/config"
 	"dp2codex/internal/deepseek"
 )
+
+// flushHTTP 刷新 SSE 缓冲区：优先 ResponseController（HTTP/2 等场景更可靠）
+func flushHTTP(w http.ResponseWriter) {
+	rc := http.NewResponseController(w)
+	if err := rc.Flush(); err != nil {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+}
 
 func generateID() string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%d", time.Now().UnixNano()))))
@@ -44,4 +55,21 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// dumpChatReqMessages 将 chatReq 中的 messages 序列化为可读字符串，用于错误诊断
+func dumpChatReqMessages(chatReq map[string]any) string {
+	messages, ok := chatReq["messages"]
+	if !ok {
+		return "<no messages>"
+	}
+	data, err := json.MarshalIndent(messages, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("<marshal error: %v>", err)
+	}
+	s := string(data)
+	if len(s) > 4000 {
+		return s[:4000] + "...(truncated)"
+	}
+	return s
 }

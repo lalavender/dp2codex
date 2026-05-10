@@ -36,8 +36,7 @@ func ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		flusher, ok := w.(http.Flusher)
-		if !ok {
+		if _, ok := w.(http.Flusher); !ok {
 			http.Error(w, `{"error":"streaming not supported"}`, 500)
 			return
 		}
@@ -76,10 +75,10 @@ func ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("data: "))
 			w.Write(data)
 			w.Write([]byte("\n\n"))
-			flusher.Flush()
+			flushHTTP(w)
 		})
 		w.Write([]byte("data: [DONE]\n\n"))
-		flusher.Flush()
+		flushHTTP(w)
 
 		if err != nil {
 			stats.RecordUpstreamError(err.Error())

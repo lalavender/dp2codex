@@ -22,16 +22,16 @@ func configFilePath() string {
 	var dir string
 	switch runtime.GOOS {
 	case "darwin":
-		dir = filepath.Join(os.Getenv("HOME"), "Library", "Application Support")
+		dir = filepath.Join(os.Getenv("HOME"), ".dp2codex")
 	case "windows":
-		dir = os.Getenv("APPDATA")
+		dir = filepath.Join(os.Getenv("APPDATA"), "dp2codex")
 	default:
-		dir = filepath.Join(os.Getenv("HOME"), ".config")
+		dir = filepath.Join(os.Getenv("HOME"), ".dp2codex")
 	}
 	if dir == "" {
 		dir = "."
 	}
-	return filepath.Join(dir, "proxy-config.json")
+	return filepath.Join(dir, "config.json")
 }
 
 func New() *Config {
@@ -45,7 +45,6 @@ func New() *Config {
 }
 
 func (c *Config) loadDefaults() {
-	// Codex 配置
 	c.setDefault("deepseek_key", os.Getenv("DEEPSEEK_API_KEY"))
 	c.setDefault("deepseek_base", getEnvDefault("DEEPSEEK_BASE", "https://api.deepseek.com"))
 	c.setDefault("default_model", getEnvDefault("DEFAULT_MODEL", "deepseek-v4-pro"))
@@ -60,21 +59,8 @@ func (c *Config) loadDefaults() {
 	c.setDefault("top_p", 0.95)
 	c.setDefault("tool_use_enforcement", true)
 	c.setDefault("tool_use_prompt", "")
-	c.setDefault("web_fetch_max_urls", parseEnvInt("WEB_FETCH_MAX_URLS", 5))
-	c.setDefault("web_fetch_timeout", parseEnvInt("WEB_FETCH_TIMEOUT", 15))
-	c.setDefault("web_fetch_max_body", parseEnvInt("WEB_FETCH_MAX_BODY", 32768))
 	c.setDefault("enable_reasoning_cache", true)
 	c.setDefault("reasoning_cache_ttl", getEnvDefault("REASONING_CACHE_TTL", "300"))
-}
-
-// 允许通过 API 更新的配置键
-var allowedKeys = map[string]bool{
-	"deepseek_key": true, "deepseek_base": true,
-	"default_model": true, "model_mapping": true,
-	"reasoning_effort": true, "max_position_embeddings": true, "max_output_tokens": true,
-	"temperature": true, "top_p": true, "tool_use_enforcement": true, "tool_use_prompt": true,
-	"web_fetch_max_urls": true, "web_fetch_timeout": true, "web_fetch_max_body": true,
-	"enable_reasoning_cache": true, "reasoning_cache_ttl": true,
 }
 
 func (c *Config) setDefault(key string, value any) {
@@ -94,26 +80,30 @@ func (c *Config) loadFile() {
 		return
 	}
 	for k, v := range fileData {
-		if allowedKeys[k] {
-			c.data[k] = v
-		}
+		c.data[k] = v
 	}
+	slog.Info("loaded config file", "file", c.file)
 }
 
-func (c *Config) saveFile() {
-	data, err := json.MarshalIndent(c.data, "", "  ")
-	if err != nil {
-		slog.Warn("config marshal error", "error", err)
-		return
-	}
-	dir := filepath.Dir(c.file)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		slog.Warn("config dir create error", "error", err)
-		return
-	}
-	if err := os.WriteFile(c.file, data, 0644); err != nil {
-		slog.Warn("config save error", "error", err)
-	}
+// SetAPIKey 设置 API Key（CLI 参数优先于环境变量和配置文件）
+func (c *Config) SetAPIKey(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data["deepseek_key"] = key
+}
+
+// SetBaseURL 设置 API Base URL
+func (c *Config) SetBaseURL(base string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data["deepseek_base"] = base
+}
+
+// SetModel 设置默认模型
+func (c *Config) SetModel(model string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data["default_model"] = model
 }
 
 func (c *Config) Get(key string) any {
@@ -170,37 +160,6 @@ func (c *Config) GetMap(key string) map[string]any {
 		return m
 	}
 	return nil
-}
-
-func (c *Config) Update(updates map[string]any) map[string]string {
-	errs := make(map[string]string)
-	c.mu.Lock()
-	for k, v := range updates {
-		if !allowedKeys[k] {
-			errs[k] = "key not allowed"
-			continue
-		}
-		c.data[k] = v
-	}
-	c.mu.Unlock()
-	c.saveFile()
-	return errs
-}
-
-func (c *Config) Reload() {
-	c.mu.Lock()
-	c.loadFile()
-	c.mu.Unlock()
-}
-
-func (c *Config) ConfigDict() map[string]any {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	cp := make(map[string]any, len(c.data))
-	for k, v := range c.data {
-		cp[k] = v
-	}
-	return cp
 }
 
 func getEnvDefault(key, def string) string {

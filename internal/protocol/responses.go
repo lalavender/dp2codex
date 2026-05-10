@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -42,48 +44,58 @@ func extractItems(items []any) []ChatMessage {
 					msg.Content = c
 				case []any:
 					var parts []ContentPart
+					var reasoningText string
 					for _, p := range c {
 						if pm, ok := p.(map[string]any); ok {
-							cp := ContentPart{}
+							partType := "text"
 							if t, ok := pm["type"].(string); ok {
-								cp.Type = mapContentType(t)
+								partType = mapContentType(t)
 							}
-							if t, ok := pm["text"].(string); ok {
-								cp.Text = t
+							text, _ := pm["text"].(string)
+							// 将 reasoning_text 提取到 ReasoningContent 字段（DeepSeek 要求回传）
+							if partType == "reasoning_text" {
+								reasoningText += text
+								continue
 							}
-							parts = append(parts, cp)
+							parts = append(parts, ContentPart{Type: partType, Text: text})
 						}
 					}
 					msg.Content = parts
+					msg.ReasoningContent = reasoningText
 				}
 			}
 			messages = append(messages, msg)
 
 		case "function_call":
-			// 转换为 assistant + tool_call
-			call := ChatMessage{Role: "assistant", Content: ""}
+			// 转换为 assistant + tool_call，合并连续的 function_call 到同一个 assistant 消息
 			name, _ := it["name"].(string)
 			args, _ := it["arguments"].(string)
 			callID, _ := it["call_id"].(string)
 
-			// 如果 callID 为空则生成一个
 			if callID == "" {
 				h := sha256.Sum256([]byte(name + args + fmt.Sprintf("%d", time.Now().UnixNano())))
 				callID = fmt.Sprintf("fc_%x", h[:8])
 			}
 
-			call.ToolCalls = []ToolCall{{
+			tc := ToolCall{
 				ID:   callID,
 				Type: "function",
 				Function: struct {
 					Name      string `json:"name"`
 					Arguments string `json:"arguments"`
 				}{Name: name, Arguments: args},
-			}}
-			if status, ok := it["status"].(string); ok && status == "completed" {
-				// 已完成的 function_call 忽略
 			}
-			messages = append(messages, call)
+
+			// 合并到前一个 assistant 消息（处理多 tool_call 场景）
+			if len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
+				messages[len(messages)-1].ToolCalls = append(messages[len(messages)-1].ToolCalls, tc)
+			} else {
+				messages = append(messages, ChatMessage{
+					Role:      "assistant",
+					Content:   "",
+					ToolCalls: []ToolCall{tc},
+				})
+			}
 
 		case "function_call_output":
 			callID, _ := it["call_id"].(string)
@@ -94,19 +106,10 @@ func extractItems(items []any) []ChatMessage {
 				Content:    output,
 			})
 
-		case "web_search_call":
-			// Codex 的 web_search 调用，转为空 assistant 消息
-			messages = append(messages, ChatMessage{
-				Role:    "assistant",
-				Content: "",
-			})
-
-		case "file_search_call":
-			// 类似 web_search_call
-			messages = append(messages, ChatMessage{
-				Role:    "assistant",
-				Content: "",
-			})
+		case "web_search_call", "file_search_call":
+			// 跳过: 这些在 Chat API 中没有对等物，创建空 assistant 消息会破坏 tool_call 链
+			slog.Debug("skipping non-chat item", "type", typ)
+			continue
 		}
 	}
 
@@ -144,26 +147,188 @@ func FixToolMessageOrdering(messages []ChatMessage) []ChatMessage {
 }
 
 // EnsureAssistantReasoning 确保 assistant 消息中包含 reasoning_content
+// 优先级：消息自身的 ReasoningContent > Content parts 中的 reasoning_text > 缓存值
 func EnsureAssistantReasoning(messages []ChatMessage, cachedReasoning string) []ChatMessage {
-	if cachedReasoning == "" {
-		return messages
-	}
 	for i := range messages {
-		if messages[i].Role == "assistant" && messages[i].ReasoningContent == "" {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+		// 1. 尝试从 Content parts 中提取 reasoning_text
+		if messages[i].ReasoningContent == "" {
+			if parts, ok := messages[i].Content.([]ContentPart); ok {
+				for _, p := range parts {
+					if p.Type == "reasoning_text" {
+						messages[i].ReasoningContent = p.Text
+						break
+					}
+				}
+			}
+		}
+		// 2. 如果仍然为空，使用缓存的 reasoning
+		if messages[i].ReasoningContent == "" && cachedReasoning != "" {
 			messages[i].ReasoningContent = cachedReasoning
 		}
 	}
 	return messages
 }
 
+// MergeConsecutiveAssistant 合并连续的 assistant 消息
+// Codex 可能把 function_call 和 assistant message 作为独立 item 发送，
+// 导致生成多个 assistant 消息（一个有 tool_calls，一个有 content），破坏 tool_call 链
+func MergeConsecutiveAssistant(messages []ChatMessage) []ChatMessage {
+	if len(messages) < 2 {
+		return messages
+	}
+	var result []ChatMessage
+	result = append(result, messages[0])
+	for i := 1; i < len(messages); i++ {
+		curr := messages[i]
+		prev := &result[len(result)-1]
+
+		if prev.Role == "assistant" && curr.Role == "assistant" {
+			// 合并 tool_calls
+			prev.ToolCalls = append(prev.ToolCalls, curr.ToolCalls...)
+
+			// 合并 content
+			mergeAssistantContent(prev, curr)
+
+			// 合并 reasoning
+			if curr.ReasoningContent != "" {
+				if prev.ReasoningContent == "" {
+					prev.ReasoningContent = curr.ReasoningContent
+				} else {
+					prev.ReasoningContent += curr.ReasoningContent
+				}
+			}
+
+			slog.Debug("merged consecutive assistant messages",
+				"tool_calls", len(prev.ToolCalls),
+				"has_content", prev.Content != nil,
+			)
+			continue
+		}
+		result = append(result, curr)
+	}
+	return result
+}
+
+// mergeAssistantContent 将 curr 的 content 合并到 prev 中
+func mergeAssistantContent(prev *ChatMessage, curr ChatMessage) {
+	if curr.Content == nil {
+		return
+	}
+	switch c := curr.Content.(type) {
+	case string:
+		if c == "" {
+			return
+		}
+		prevStr, isStr := prev.Content.(string)
+		if (isStr && prevStr == "") || prev.Content == nil {
+			prev.Content = c
+		}
+	case []ContentPart:
+		if len(c) == 0 {
+			return
+		}
+		if prevParts, ok := prev.Content.([]ContentPart); ok {
+			prev.Content = append(prevParts, c...)
+		} else {
+			prev.Content = c
+		}
+	}
+}
+
+// ValidateToolCallPairs 验证每个 assistant 的 tool_calls 都有对应的 tool 响应
+// 移除没有响应的孤立 tool_calls，防止上游 API 报错
+func ValidateToolCallPairs(messages []ChatMessage) []ChatMessage {
+	// 收集所有 tool 响应的 call_id
+	toolResponseIDs := make(map[string]bool)
+	for _, msg := range messages {
+		if msg.Role == "tool" && msg.ToolCallID != "" {
+			toolResponseIDs[msg.ToolCallID] = true
+		}
+	}
+
+	var result []ChatMessage
+	for _, msg := range messages {
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			var validCalls []ToolCall
+			var orphaned []string
+			for _, tc := range msg.ToolCalls {
+				if toolResponseIDs[tc.ID] {
+					validCalls = append(validCalls, tc)
+				} else {
+					orphaned = append(orphaned, fmt.Sprintf("%s(id=%s)", tc.Function.Name, tc.ID))
+				}
+			}
+			if len(orphaned) > 0 {
+				slog.Warn("removing orphaned tool_calls without responses",
+					"orphaned", orphaned,
+					"kept", len(validCalls),
+				)
+			}
+			msg.ToolCalls = validCalls
+
+			// 跳过完全空的 assistant 消息
+			contentStr, isStr := msg.Content.(string)
+			if len(msg.ToolCalls) == 0 && ((isStr && contentStr == "") || msg.Content == nil) {
+				slog.Debug("removing empty assistant message after orphan cleanup")
+				continue
+			}
+		}
+		result = append(result, msg)
+	}
+	return result
+}
+
+// LogMessagesDebug 仅在 debug 日志级别输出完整消息结构，避免拖慢热路径
+func LogMessagesDebug(label string, messages []ChatMessage) {
+	var parts []string
+	for i, msg := range messages {
+		info := fmt.Sprintf("[%d] role=%s", i, msg.Role)
+		switch c := msg.Content.(type) {
+		case string:
+			if len(c) > 80 {
+				info += fmt.Sprintf(" content=%q...", c[:80])
+			} else if c != "" {
+				info += fmt.Sprintf(" content=%q", c)
+			}
+		case []ContentPart:
+			info += fmt.Sprintf(" content_parts=%d", len(c))
+		}
+		if len(msg.ToolCalls) > 0 {
+			var names []string
+			for _, tc := range msg.ToolCalls {
+				names = append(names, fmt.Sprintf("%s(id=%s)", tc.Function.Name, tc.ID))
+			}
+			info += fmt.Sprintf(" tool_calls=[%s]", strings.Join(names, ", "))
+		}
+		if msg.ToolCallID != "" {
+			info += fmt.Sprintf(" tool_call_id=%s", msg.ToolCallID)
+		}
+		if msg.ReasoningContent != "" {
+			info += fmt.Sprintf(" reasoning_len=%d", len(msg.ReasoningContent))
+		}
+		parts = append(parts, info)
+	}
+	slog.Debug(label, "messages", strings.Join(parts, " | "))
+}
+
 // ResponsesToChat 将 OpenAI Responses API 请求转换为 DeepSeek Chat 格式
 func ResponsesToChat(data map[string]any, cachedReasoning string, isFirstRound bool) map[string]any {
 	messages := ExtractMessageItems(data["input"])
 	if len(messages) == 0 {
+		slog.Warn("ResponsesToChat: no messages extracted from input")
 		return nil
 	}
 
+	LogMessagesDebug("extracted messages (raw)", messages)
+
+	messages = MergeConsecutiveAssistant(messages)
 	messages = FixToolMessageOrdering(messages)
+	messages = ValidateToolCallPairs(messages)
+
+	LogMessagesDebug("messages (after merge+fix+validate)", messages)
 
 	// 处理 instructions 字段（Codex v0.130+）
 	if instructions, ok := data["instructions"].(string); ok && instructions != "" {
@@ -183,7 +348,6 @@ func ResponsesToChat(data map[string]any, cachedReasoning string, isFirstRound b
 
 	// 模型映射
 	if model, ok := data["model"].(string); ok && model != "" {
-		// model mapping handled by caller
 		chatReq["model"] = model
 	}
 
@@ -219,6 +383,7 @@ func ResponsesToChat(data map[string]any, cachedReasoning string, isFirstRound b
 		}
 	}
 
+	slog.Debug("ResponsesToChat complete", "total_messages", len(messages), "has_tools", chatReq["tools"] != nil)
 	return chatReq
 }
 
@@ -249,8 +414,8 @@ func ChatToResponses(chatResp map[string]any, model string) map[string]any {
 			"role": "assistant",
 			"content": []map[string]any{
 				{
-					"type": "reasoning_text",
-					"text": rc,
+					"type":        "reasoning_text",
+					"text":        rc,
 					"annotations": []any{},
 				},
 			},
@@ -264,8 +429,8 @@ func ChatToResponses(chatResp map[string]any, model string) map[string]any {
 			"role": "assistant",
 			"content": []map[string]any{
 				{
-					"type": "output_text",
-					"text": content,
+					"type":        "output_text",
+					"text":        content,
 					"annotations": []any{},
 				},
 			},
@@ -294,8 +459,8 @@ func ChatToResponses(chatResp map[string]any, model string) map[string]any {
 			"role": "assistant",
 			"content": []map[string]any{
 				{
-					"type": "output_text",
-					"text": "",
+					"type":        "output_text",
+					"text":        "",
 					"annotations": []any{},
 				},
 			},
@@ -401,9 +566,9 @@ func BuildResponseSSE(chatResp map[string]any, model string) []string {
 				"data": map[string]any{
 					"output_index": 0,
 					"item": map[string]any{
-						"id":   outputItemID,
-						"type": "message",
-						"role": "assistant",
+						"id":      outputItemID,
+						"type":    "message",
+						"role":    "assistant",
 						"content": []map[string]any{},
 					},
 				},
@@ -412,7 +577,7 @@ func BuildResponseSSE(chatResp map[string]any, model string) []string {
 		events = append(events, BuildSSEEvent("response.content_part.added", map[string]any{
 			"type": "response.content_part.added",
 			"data": map[string]any{
-				"output_index": 0,
+				"output_index":  0,
 				"content_index": 0,
 				"part": map[string]any{
 					"type": "output_text",
@@ -423,9 +588,9 @@ func BuildResponseSSE(chatResp map[string]any, model string) []string {
 		events = append(events, BuildSSEEvent("response.output_text.delta", map[string]any{
 			"type": "response.output_text.delta",
 			"data": map[string]any{
-				"output_index": 0,
+				"output_index":  0,
 				"content_index": 0,
-				"delta": content,
+				"delta":         content,
 			},
 		}))
 	}
@@ -534,10 +699,10 @@ func generateID(prefix string) string {
 
 // StreamDelta 流式 delta 数据结构
 type StreamDelta struct {
-	Content      string `json:"content,omitempty"`
-	Reasoning    string `json:"reasoning,omitempty"`
+	Content      string     `json:"content,omitempty"`
+	Reasoning    string     `json:"reasoning,omitempty"`
 	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
-	FinishReason string `json:"finish_reason,omitempty"`
+	FinishReason string     `json:"finish_reason,omitempty"`
 }
 
 // normalizeTool 将 OpenAI v2 工具格式转为 DeepSeek 支持的格式

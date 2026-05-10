@@ -2,8 +2,6 @@ package stats
 
 import (
 	"fmt"
-	"log/slog"
-	"os"
 	"regexp"
 	"strconv"
 	"sync"
@@ -23,27 +21,12 @@ type Stats struct {
 	cacheMisses      atomic.Int64
 	upstreamErrors   map[string]int64
 	upstreamErrOrder []string
-	logBuf           []LogEntry
-	logMax           int
-}
-
-type LogEntry struct {
-	Time    time.Time `json:"time"`
-	Message string    `json:"message"`
 }
 
 var globalStats = &Stats{
 	startTime:      time.Now(),
 	errorsByCode:   make(map[int]int64),
 	upstreamErrors: make(map[string]int64),
-	logBuf:         make([]LogEntry, 0, 200),
-	logMax:         200,
-}
-
-func init() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})))
 }
 
 func RecordRequest() { globalStats.totalRequests.Add(1) }
@@ -76,35 +59,6 @@ func DecrementActiveStreams() { globalStats.activeStreams.Add(-1) }
 
 func Sanitize(msg string) string {
 	return reReplace.ReplaceAllString(msg, "***")
-}
-
-func Log(format string, args ...any) {
-	msg := format
-	if len(args) > 0 {
-		msg = fmt.Sprintf(format, args...)
-	}
-	msg = Sanitize(msg)
-	slog.Info(msg)
-
-	entry := LogEntry{Time: time.Now(), Message: msg}
-	globalStats.mu.Lock()
-	if len(globalStats.logBuf) >= globalStats.logMax {
-		globalStats.logBuf = globalStats.logBuf[1:]
-	}
-	globalStats.logBuf = append(globalStats.logBuf, entry)
-	globalStats.mu.Unlock()
-}
-
-func GetLogs(limit int) []LogEntry {
-	globalStats.mu.RLock()
-	defer globalStats.mu.RUnlock()
-	n := limit
-	if n > len(globalStats.logBuf) {
-		n = len(globalStats.logBuf)
-	}
-	result := make([]LogEntry, n)
-	copy(result, globalStats.logBuf[len(globalStats.logBuf)-n:])
-	return result
 }
 
 func GetStats() map[string]any {
@@ -149,4 +103,11 @@ func GetStats() map[string]any {
 		"cache_hit_rate":  cacheRate,
 		"upstream_errors": upstream,
 	}
+}
+
+// Summary 返回简洁的统计摘要字符串
+func Summary() string {
+	s := GetStats()
+	return fmt.Sprintf("requests=%v active_streams=%v errors=%v uptime=%.0fs",
+		s["total_requests"], s["active_streams"], s["error_rate"], s["uptime_seconds"])
 }
