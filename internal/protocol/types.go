@@ -30,7 +30,7 @@ type ChatMessage struct {
 
 type ContentPart struct {
 	Type     string `json:"type"`               // "text", "image_url"
-	Text     string `json:"text,omitempty"`
+	Text     string `json:"text"`
 	ImageURL *struct {
 		URL string `json:"url"`
 	} `json:"image_url,omitempty"`
