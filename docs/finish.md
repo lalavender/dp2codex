@@ -1,0 +1,22 @@
+# 已完成
+
+- [x] Go module 初始化和目录结构
+- [x] 配置系统（JSON 持久化、环境变量、线程安全）
+- [x] TLS 证书生成（CA + 服务端证书链，crypto/x509）
+- [x] DeepSeek API 客户端（流式/非流式请求）
+- [x] 协议转换 - OpenAI Responses ↔ DeepSeek Chat
+- [x] 协议转换 - Anthropic Messages ↔ DeepSeek Chat
+- [x] 模型名称映射
+- [x] 推理缓存（Redis + 内存，会话隔离）
+- [x] Web 预取 + SSRF 防护
+- [x] 统计计数 & 日志脱敏
+- [x] 路由处理器（chat, responses, compact, messages, models, codex RPC）
+- [x] 管理面板（配置 API、认证、内嵌 HTML UI）
+- [x] HTTP 服务器（端口 8080）
+- [x] HTTPS 服务器（端口 8444）
+- [x] 管理面板服务器（端口 8090）
+- [x] CONNECT 隧道（端口 8443）
+- [x] 优雅关闭
+- [x] 编译通过（go build + go vet）
+- [x] Codex v0.130 兼容性修复—SSE 事件格式修正（response 字段名 data→response）
+- [x] 空 Instructions-only 请求处理（返回 status, usage, output_text 字段）
