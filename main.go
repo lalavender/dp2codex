@@ -39,11 +39,10 @@ func main() {
 	showVer := flag.Bool("version", false, "打印版本后退出")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "dp2codex — Codex CLI 的 DeepSeek 本地代理（仅 HTTP API，无 Web 控制台）\n\n")
+		fmt.Fprintf(os.Stderr, "dp2codex — Codex CLI 的 DeepSeek 本地代理\n\n")
 		fmt.Fprintf(os.Stderr, "用法:\n")
-		fmt.Fprintf(os.Stderr, "  dp2codex [选项] <deepseek-api-key>\n")
-		fmt.Fprintf(os.Stderr, "  export DEEPSEEK_API_KEY=<key> && dp2codex [选项]\n\n")
-		fmt.Fprintf(os.Stderr, "必填: DeepSeek API Key（第一个参数，或环境变量 DEEPSEEK_API_KEY）。\n\n")
+		fmt.Fprintf(os.Stderr, "  dp2codex [选项]\n\n")
+		fmt.Fprintf(os.Stderr, "API Key 从二进制同目录下的 .env 文件读取（DEEPSEEK_API_KEY）。\n\n")
 		fmt.Fprintf(os.Stderr, "选项:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n环境与日志:\n")
@@ -51,25 +50,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  DEEPSEEK_BASE               上游 API Base URL\n")
 		fmt.Fprintf(os.Stderr, "  DEFAULT_MODEL               默认模型名\n")
 		fmt.Fprintf(os.Stderr, "  DP2CODEX_LOG_DIR            日志目录（默认平台数据目录下 logs/）\n")
-		fmt.Fprintf(os.Stderr, "  DP2CODEX_LOG_MAX_MB         单日志文件上限(MB)，默认 10；超限轮转\n")
-		fmt.Fprintf(os.Stderr, "  DP2CODEX_LOG_MAX_FILES      轮转备份个数，默认 5（含当前活跃文件外的历史）\n")
-		fmt.Fprintf(os.Stderr, "  DP2CODEX_LOG_MAX_AGE_DAYS   保留天数，默认 7；超时删除整个过期文件\n")
+		fmt.Fprintf(os.Stderr, "  DP2CODEX_LOG_MAX_MB         单日志文件上限(MB)，默认 10\n")
+		fmt.Fprintf(os.Stderr, "  DP2CODEX_LOG_MAX_FILES      轮转备份个数，默认 5\n")
+		fmt.Fprintf(os.Stderr, "  DP2CODEX_LOG_MAX_AGE_DAYS   保留天数，默认 7\n")
 	}
 	flag.Parse()
 
 	if *showVer {
 		fmt.Println(version)
 		os.Exit(0)
-	}
-
-	key := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
-	if args := flag.Args(); len(args) >= 1 {
-		key = strings.TrimSpace(args[0])
-	}
-	if key == "" {
-		fmt.Fprintf(os.Stderr, "错误: 缺少 DeepSeek API Key（请传入第一个参数或设置 DEEPSEEK_API_KEY）。\n\n")
-		flag.Usage()
-		os.Exit(1)
 	}
 
 	addr := strings.TrimSpace(*listen)
@@ -94,7 +83,11 @@ func main() {
 		logging.SetupSimple(*debug)
 	}
 
+	key := os.Getenv("DEEPSEEK_API_KEY")
 	config.Global.SetAPIKey(key)
+	if key == "" {
+		slog.Warn("未配置 DEEPSEEK_API_KEY（从二进制同目录 .env 读取）；将依赖请求头 Authorization")
+	}
 
 	printBanner(addr)
 

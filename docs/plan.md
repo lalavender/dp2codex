@@ -1,24 +1,20 @@
 # dp2codex 计划
 
-## 项目目标
+## 当前目标
 
-用 Go 语言完整重写 JinDX（Python FastAPI 项目），功能是将 OpenAI Responses API 和 Anthropic Messages API 转换为 DeepSeek Chat Completions API，使 Codex CLI 和 Claude Code 能够使用 DeepSeek 模型。
+保持 Codex CLI 的 OpenAI Responses API 到 DeepSeek Chat Completions API 的转换链路可用，并重点补齐以下交付：
 
-## 架构
+1. 将 `Responses` 推理缓存改为 `Redis 优先、内存回退`
+2. 修复 Redis 首次连接失败后无法恢复的问题，提升缓存命中率
+3. 生成可直接构建运行的 `Dockerfile`
 
-```
-main.go → 启动 4 个服务器（HTTP/HTTPS/Admin/Tunnel）
-├── internal/config:   JSON 持久化配置
-├── internal/cert:     TLS 证书自生成
-├── internal/deepseek: DeepSeek API 客户端
-├── internal/protocol: 协议转换（Responses ↔ Chat, Anthropic ↔ Chat）
-├── internal/handler:  HTTP 请求处理器
-├── internal/cache:    推理缓存（Redis + 内存）
-├── internal/web:      URL 预取 & SSRF 防护
-├── internal/stats:    统计 & 日志
-└── internal/admin:    管理面板
-```
+## 本次实施步骤
+
+1. 审查 `internal/handler/responses.go`、`internal/protocol/responses.go`、`internal/cache/*`
+2. 将会话级 reasoning 缓存接入 Redis，并保留本地内存回退
+3. 补齐容器构建文件，保留 `docker-compose.yml` 中的 Redis 编排
+4. 执行构建和诊断检查，确认改动可用
 
 ## 实现状态
 
-参见 docs/finish.md 和 docs/todo.md
+参见 `docs/finish.md` 和 `docs/todo.md`

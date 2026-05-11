@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 
-	"dp2codex/internal/config"
 	"dp2codex/internal/deepseek"
 	"dp2codex/internal/stats"
 )
@@ -26,10 +25,7 @@ func ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := deepseek.NewClient(
-		config.Global.GetString("deepseek_base"),
-		config.Global.GetString("deepseek_key"),
-	)
+	client := newDSClient(r, "codex")
 
 	stream, _ := req["stream"].(bool)
 	if stream {
@@ -77,12 +73,21 @@ func ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("\n\n"))
 			flushHTTP(w)
 		})
-		w.Write([]byte("data: [DONE]\n\n"))
-		flushHTTP(w)
-
 		if err != nil {
 			stats.RecordUpstreamError(err.Error())
+			resp := map[string]any{
+				"error": map[string]any{
+					"message": err.Error(),
+				},
+			}
+			data, _ := json.Marshal(resp)
+			w.Write([]byte("data: "))
+			w.Write(data)
+			w.Write([]byte("\n\n"))
+			flushHTTP(w)
 		}
+		w.Write([]byte("data: [DONE]\n\n"))
+		flushHTTP(w)
 	} else {
 		resp, err := client.Chat(req, "codex")
 		if err != nil {

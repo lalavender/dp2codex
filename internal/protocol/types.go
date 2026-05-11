@@ -25,7 +25,7 @@ type ChatMessage struct {
 	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID   string     `json:"tool_call_id,omitempty"`
 	Name         string     `json:"name,omitempty"`
-	ReasoningContent string `json:"reasoning_content,omitempty"` // DeepSeek 专用
+	ReasoningContent string `json:"reasoning_content"` // DeepSeek 专用
 }
 
 type ContentPart struct {

@@ -15,25 +15,34 @@ cd dp2codex
 go build -o dp2codex .
 ```
 
-### 启动（必填一项：API Key）
+### 配置 API Key
+
+在二进制同目录下创建 `.env` 文件：
 
 ```bash
-# 方式一：环境变量
-export DEEPSEEK_API_KEY=sk-your-key-here
-./dp2codex
-
-# 方式二：第一个参数传入密钥（选项须写在参数前）
-./dp2codex sk-your-key-here
-./dp2codex -listen 127.0.0.1:9090 sk-your-key-here
+echo "DEEPSEEK_API_KEY=sk-your-key-here" > .env
 ```
 
-日志默认写入平台数据目录下的 `logs/dp2codex.log`（如 macOS/Linux：`~/.dp2codex/logs/`），支持按大小轮转与按天数的保留清理；可通过环境变量覆盖（见下文）。
+或设置环境变量：
 
-### 后台部署（多平台）
+```bash
+export DEEPSEEK_API_KEY=sk-your-key-here
+```
 
-- **Linux systemd**：参考 `deploy/systemd/dp2codex.service`，用 `EnvironmentFile` 提供 `DEEPSEEK_API_KEY`，勿把密钥写进单元文件本身。
-- **macOS launchd**：参考 `deploy/launchd/io.dp2codex.plist`，在 `EnvironmentVariables` 中设置 `DEEPSEEK_API_KEY` 后 `launchctl load`。
-- **容器**：根目录 `Dockerfile`，运行时注入 `-e DEEPSEEK_API_KEY=...`，默认监听 `0.0.0.0:9090`。
+### 启动
+
+```bash
+./dp2codex
+```
+
+日志默认写入平台数据目录下的 `logs/dp2codex.log`（如 macOS/Linux：`~/.dp2codex/logs/`），支持按大小轮转与按天数的保留清理。
+
+### 自定义监听地址
+
+```bash
+export DP2CODEX_LISTEN=127.0.0.1:9090
+./dp2codex
+```
 
 ## Codex CLI 配置方式
 
@@ -53,19 +62,13 @@ requires_openai_auth = true
 
 ### 2. 设置环境变量启动 Codex
 
-启动 Codex CLI 前必须设置环境变量：
-
 ```bash
 export OPENAI_API_KEY=sk-your-deepseek-key
 export OPENAI_BASE_URL=http://localhost:9090/v1
 export NO_PROXY="localhost,127.0.0.1,::1"
 unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
 
-# 启动 Codex CLI（交互模式）
 codex
-
-# 或者单次命令
-codex exec --skip-git-repo-check "hi"
 ```
 
 **注意事项：**
@@ -76,19 +79,19 @@ codex exec --skip-git-repo-check "hi"
 
 ## 验证代理是否工作
 
-### 1. 健康检查
+### 健康检查
 
 ```bash
 curl http://localhost:9090/health
 ```
 
-### 2. 模型列表
+### 模型列表
 
 ```bash
 curl http://localhost:9090/v1/models
 ```
 
-### 3. Chat Completions 测试
+### Chat Completions 测试
 
 ```bash
 curl -X POST http://localhost:9090/v1/chat/completions \
@@ -101,7 +104,7 @@ curl -X POST http://localhost:9090/v1/chat/completions \
   }' | jq .
 ```
 
-### 4. 流式 Chat Completions
+### 流式 Chat Completions
 
 ```bash
 curl -N -X POST http://localhost:9090/v1/chat/completions \
@@ -114,7 +117,7 @@ curl -N -X POST http://localhost:9090/v1/chat/completions \
   }'
 ```
 
-### 5. Responses API 测试（Codex CLI 使用的协议）
+### Responses API 测试（Codex CLI 使用的协议）
 
 ```bash
 curl -X POST http://localhost:9090/v1/responses \
@@ -125,7 +128,7 @@ curl -X POST http://localhost:9090/v1/responses \
   }' | jq .
 ```
 
-### 6. 流式 Responses API
+### 流式 Responses API
 
 ```bash
 curl -N -X POST http://localhost:9090/v1/responses \
@@ -137,7 +140,7 @@ curl -N -X POST http://localhost:9090/v1/responses \
   }'
 ```
 
-### 7. 对话压缩测试
+### 对话压缩测试
 
 ```bash
 curl -X POST http://localhost:9090/v1/responses/compact \
@@ -153,17 +156,22 @@ curl -X POST http://localhost:9090/v1/responses/compact \
 
 ## 配置说明
 
+### API Key 读取优先级
+
+1. 环境变量 `DEEPSEEK_API_KEY`
+2. 二进制同目录下的 `.env` 文件
+
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `DEEPSEEK_API_KEY` | — | DeepSeek API 密钥（与 CLI 第一个参数二选一） |
+| `DEEPSEEK_API_KEY` | — | DeepSeek API 密钥（必填） |
 | `DP2CODEX_LISTEN` | `:9090` | HTTP 监听地址 |
 | `DEEPSEEK_BASE` | `https://api.deepseek.com` | DeepSeek API 地址 |
 | `DEFAULT_MODEL` | `deepseek-v4-pro` | 默认模型名 |
 | `DP2CODEX_LOG_DIR` | 平台默认数据目录下 `logs` | 日志目录 |
 | `DP2CODEX_LOG_MAX_MB` | `10` | 单文件上限(MB)，超出后轮转 |
-| `DP2CODEX_LOG_MAX_FILES` | `5` | 轮转保留的历史文件个数策略 |
+| `DP2CODEX_LOG_MAX_FILES` | `5` | 轮转保留的历史文件个数 |
 | `DP2CODEX_LOG_MAX_AGE_DAYS` | `7` | 超过该天数的日志文件会被删除 |
 | `REASONING_EFFORT` | `high` | 推理力度 (low/medium/high) |
 | `MAX_POSITION_EMBEDDINGS` | `272000` | 上下文窗口大小 |
@@ -171,7 +179,16 @@ curl -X POST http://localhost:9090/v1/responses/compact \
 | `ENABLE_REASONING_CACHE` | `true` | 启用推理缓存 |
 | `REASONING_CACHE_TTL` | `300` | 缓存有效期（秒） |
 
-可选配置文件仍为 `~/.dp2codex/config.json`（模型映射等）；**API Key 建议仅用参数或 `DEEPSEEK_API_KEY` 注入**，勿提交到仓库。
+可选配置文件 `~/.dp2codex/config.json`（模型映射等）。
+
+### 模型映射
+
+| Codex 请求模型 | 实际调用模型 |
+|---------------|-------------|
+| `gpt-5.5` | `deepseek-v4-pro` |
+| `gpt-5` | `deepseek-v4-pro` |
+
+可通过 `~/.dp2codex/config.json` 中的 `model_mapping` 自定义映射。
 
 ## 常见问题
 
@@ -181,7 +198,7 @@ SSE 事件格式不匹配导致。确保使用最新版本的 dp2codex。
 
 ### Codex 连接不上代理
 
-检查环境变量：
+检查：
 1. `OPENAI_BASE_URL` 是否指向 `http://localhost:9090/v1`
 2. `NO_PROXY` 是否包含 `localhost,127.0.0.1,::1`
 3. 所有 `HTTPS_PROXY` / `HTTP_PROXY` 是否已取消设置
@@ -202,12 +219,6 @@ Codex CLI → POST /v1/responses (OpenAI Responses 格式)
   → deepseek.Client.ChatStream() 调用 DeepSeek API
   → SSE 流式响应转换回 Responses 格式
   → Codex CLI 接收响应
-
-功能串联：
-- 模型映射 (gpt-5.5 → deepseek-v4-pro)
-- 推理缓存（跨轮次 thinking 连续性）
-- 多 tool call 合并
-- tool 消息排序修复
 ```
 
 ### SSE 事件格式
@@ -215,31 +226,48 @@ Codex CLI → POST /v1/responses (OpenAI Responses 格式)
 dp2codex 遵循 Codex CLI 的 SSE 事件格式要求。核心事件序列：
 
 ```
-response.created       → 建立响应会话
-response.in_progress   → 处理中
+response.created           → 建立响应会话
+response.in_progress       → 处理中
 response.output_item.added → 添加输出项
 response.content_part.added → 添加内容块
-response.output_text.delta  → 流式文本（重复）
-response.output_item.done   → 输出项完成
-response.completed     → 响应完成
+response.output_text.delta → 流式文本（重复）
+response.output_item.done  → 输出项完成
+response.completed         → 响应完成
 ```
 
-## 项目文件结构（节选）
+## 项目文件结构
 
 ```
-├── main.go
-├── Dockerfile
-├── deploy/
-│   ├── systemd/dp2codex.service
-│   └── launchd/io.dp2codex.plist
+├── main.go                     # 入口
+├── go.mod / go.sum             # Go 模块定义
+├── .env.example                # 环境变量模板
+│
 ├── internal/
-│   ├── config/
+│   ├── config/config.go        # JSON 持久化配置
 │   ├── protocol/
+│   │   ├── types.go            # 数据结构定义
+│   │   ├── modelmap.go         # 模型名称映射
+│   │   └── responses.go        # 协议转换（Responses ↔ Chat）
 │   ├── handler/
-│   ├── deepseek/
+│   │   ├── responses.go        # Responses API 处理（含推理缓存）
+│   │   ├── chat.go             # Chat Completions API 处理
+│   │   ├── codex.go            # Codex 专用 API（模型列表等）
+│   │   └── common.go           # 公共辅助函数
+│   ├── deepseek/client.go      # DeepSeek API 客户端（流式/非流式）
 │   ├── cache/
-│   ├── stats/
-│   ├── logging/
-│   └── server/
+│   │   ├── cache.go            # 缓存接口
+│   │   ├── memory.go           # 内存缓存实现（带 TTL + 轮转清理）
+│   │   └── reasoning.go        # 推理缓存封装
+│   ├── server/http.go          # HTTP 服务器 & 路由注册
+│   ├── logging/logging.go      # 日志初始化 & 轮转
+│   └── stats/stats.go          # 统计计数 & 日志脱敏
+│
 └── docs/
+    ├── plan.md                 # 实施计划
+    ├── todo.md                 # 待完成
+    └── finish.md               # 已完成
 ```
+
+## 致谢
+
+本项目参考了 [JinDX](https://github.com/daxian10086/JinDX) 项目的设计思路与架构，感谢原作者的开源贡献。

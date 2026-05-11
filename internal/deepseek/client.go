@@ -105,8 +105,17 @@ type StreamCallback func(delta Delta, isLast bool, usage *Usage)
 
 // Chat 非流式请求
 func (c *Client) Chat(request map[string]any, source string) (*ChatResponse, error) {
-	baseURL := config.Global.GetString("deepseek_base")
-	apiKey := config.Global.GetString("deepseek_key")
+	baseURL := strings.TrimRight(c.baseURL, "/")
+	apiKey := strings.TrimSpace(c.apiKey)
+	if baseURL == "" {
+		baseURL = strings.TrimRight(config.Global.GetString("deepseek_base"), "/")
+	}
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(config.Global.GetString("deepseek_key"))
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("missing DeepSeek API key")
+	}
 
 	requestURL := baseURL + "/v1/chat/completions"
 	body, _ := json.Marshal(request)
@@ -139,8 +148,17 @@ func (c *Client) Chat(request map[string]any, source string) (*ChatResponse, err
 
 // ChatStream 流式请求
 func (c *Client) ChatStream(request map[string]any, source string, cb StreamCallback) error {
-	baseURL := config.Global.GetString("deepseek_base")
-	apiKey := config.Global.GetString("deepseek_key")
+	baseURL := strings.TrimRight(c.baseURL, "/")
+	apiKey := strings.TrimSpace(c.apiKey)
+	if baseURL == "" {
+		baseURL = strings.TrimRight(config.Global.GetString("deepseek_base"), "/")
+	}
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(config.Global.GetString("deepseek_key"))
+	}
+	if apiKey == "" {
+		return fmt.Errorf("missing DeepSeek API key")
+	}
 
 	request["stream"] = true
 	// 请求在最后一个 chunk 中返回 usage 统计

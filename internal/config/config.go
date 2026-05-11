@@ -1,12 +1,14 @@
 package config
 
 import (
+	"bufio"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -16,7 +18,12 @@ type Config struct {
 	data map[string]any
 }
 
-var Global = New()
+var Global = newGlobal()
+
+func newGlobal() *Config {
+	loadDotEnv()
+	return New()
+}
 
 func configFilePath() string {
 	var dir string
@@ -45,7 +52,7 @@ func New() *Config {
 }
 
 func (c *Config) loadDefaults() {
-	c.setDefault("deepseek_key", os.Getenv("DEEPSEEK_API_KEY"))
+	c.setDefault("deepseek_key", readAPIKeyFromEnv())
 	c.setDefault("deepseek_base", getEnvDefault("DEEPSEEK_BASE", "https://api.deepseek.com"))
 	c.setDefault("default_model", getEnvDefault("DEFAULT_MODEL", "deepseek-v4-pro"))
 	c.setDefault("model_mapping", map[string]string{
@@ -60,8 +67,7 @@ func (c *Config) loadDefaults() {
 	c.setDefault("tool_use_enforcement", true)
 	c.setDefault("tool_use_prompt", "")
 	c.setDefault("enable_reasoning_cache", true)
-	c.setDefault("reasoning_cache_ttl", getEnvDefault("REASONING_CACHE_TTL", "300"))
-}
+	c.setDefault("reasoning_cache_ttl", getEnvDefault("REASONING_CACHE_TTL", "300"))}
 
 func (c *Config) setDefault(key string, value any) {
 	if _, exists := c.data[key]; !exists {
@@ -179,4 +185,60 @@ func parseEnvInt(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+func readAPIKeyFromEnv() string {
+	return os.Getenv("DEEPSEEK_API_KEY")
+}
+
+func loadDotEnv() {
+	if exe, err := os.Executable(); err == nil {
+		loadDotEnvFile(filepath.Join(filepath.Dir(exe), ".env"))
+	}
+}
+
+func loadDotEnvFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	loaded := false
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := parseDotEnvLine(line)
+		if !ok || key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); exists {
+			continue
+		}
+		_ = os.Setenv(key, value)
+		loaded = true
+	}
+
+	if loaded {
+		slog.Info("loaded .env file", "path", path)
+	}
+	return loaded
+}
+
+func parseDotEnvLine(line string) (string, string, bool) {
+	if strings.HasPrefix(line, "export ") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+	}
+	key, value, ok := strings.Cut(line, "=")
+	if !ok {
+		return "", "", false
+	}
+
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, `"'`)
+	return key, value, true
 }

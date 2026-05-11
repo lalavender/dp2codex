@@ -20,3 +20,10 @@
 - [x] 编译通过（go build + go vet）
 - [x] Codex v0.130 兼容性修复—SSE 事件格式修正（response 字段名 data→response）
 - [x] 空 Instructions-only 请求处理（返回 status, usage, output_text 字段）
+- [x] 部署脚本移植 — Linux systemd 一键安装 (deploy/install.sh)
+- [x] 部署脚本移植 — macOS launchd 一键安装 (deploy/install.sh)
+- [x] 部署脚本移植 — Windows 服务一键安装 (deploy/install.ps1)
+- [x] Windows 服务支持 (internal/svc/, `--service` flag, SCM 集成)
+- [x] Responses 推理缓存切换为 Redis 优先，内存回退
+- [x] Redis 首次连接失败后的自动重连
+- [x] Dockerfile 生成

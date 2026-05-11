@@ -3,7 +3,7 @@ package protocol
 import "strings"
 
 var defaultModelMapping = map[string]string{
-	"gpt-5.5":           "deepseek-v4-pro",
+	"gpt-5.5":           "deepseek-v4-flash",
 	"gpt-5":             "deepseek-v4-pro",
 	"deepseek-chat":     "deepseek-v4-pro",
 	"deepseek-v4-pro":   "deepseek-v4-pro",

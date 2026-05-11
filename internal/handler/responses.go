@@ -14,6 +14,7 @@ import (
 	"dp2codex/internal/deepseek"
 	"dp2codex/internal/protocol"
 	"dp2codex/internal/stats"
+	"strings"
 )
 
 func compactReq(data map[string]any) slog.Attr {
@@ -49,7 +50,7 @@ func compactReq(data map[string]any) slog.Attr {
 	)
 }
 
-var reasoningCache = newReasoningCache()
+var reasoningCache = cache.NewReasoningCache()
 
 // ResponsesHTTP 处理 POST /v1/responses
 func ResponsesHTTP(w http.ResponseWriter, r *http.Request) {
@@ -115,10 +116,14 @@ func ResponsesHTTP(w http.ResponseWriter, r *http.Request) {
 	data["model"] = mappedModel
 
 	// 推理缓存
-	cachedReasoning := ""
+	var cachedReasoning []string
 	if config.Global.GetBool("enable_reasoning_cache") {
-		if r, ok := reasoningCache.Get("codex", sessionID); ok {
+		ttl := reasoningCacheTTL()
+		if r, ok := reasoningCache.Get("codex", sessionID, ttl); ok {
 			cachedReasoning = r
+			stats.RecordCache(true)
+		} else {
+			stats.RecordCache(false)
 		}
 	}
 
@@ -139,12 +144,12 @@ func ResponsesHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// stream
 	if stream, ok := data["stream"].(bool); ok && stream {
-		streamResponses(w, chatReq, mappedModel, sessionID)
+		streamResponses(w, r, chatReq, mappedModel, sessionID)
 		return
 	}
 
 	// 非流式
-	client := newDSClient("codex")
+	client := newDSClient(r, "codex")
 	resp, err := client.Chat(chatReq, "codex")
 	if err != nil {
 		slog.Error("non-stream upstream error",
@@ -168,7 +173,7 @@ func ResponsesHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(responsesObj)
 }
 
-func streamResponses(w http.ResponseWriter, chatReq map[string]any, model, sessionID string) {
+func streamResponses(w http.ResponseWriter, r *http.Request, chatReq map[string]any, model, sessionID string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -221,7 +226,7 @@ func streamResponses(w http.ResponseWriter, chatReq map[string]any, model, sessi
 	})))
 	flushHTTP(w)
 
-	client := newDSClient("codex")
+	client := newDSClient(r, "codex")
 	var fullReasoning string
 	var reasoningItemSent bool
 	var reasoningItemID string
@@ -367,11 +372,28 @@ func streamResponses(w http.ResponseWriter, chatReq map[string]any, model, sessi
 		}
 	})
 	if err != nil && !streamDone {
+		var reasoningDump []string
+		if msgs, ok := chatReq["messages"].([]protocol.ChatMessage); ok {
+			for i, msg := range msgs {
+				if msg.Role == "assistant" {
+					reasoningDump = append(reasoningDump,
+						fmt.Sprintf("[%d] content_len=%d reasoning_len=%d tool_calls=%d",
+							i, contentStringLen(msg.Content), len(msg.ReasoningContent), len(msg.ToolCalls)))
+				}
+			}
+		}
 		slog.Error("chat stream error",
 			"error", err,
 			"model", model,
-			"chatReq_dump", dumpChatReqMessages(chatReq),
+			"assistant_reasoning", strings.Join(reasoningDump, " | "),
 		)
+		w.Write([]byte(protocol.BuildSSEEvent("error", map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"message": err.Error(),
+			},
+		})))
+		flushHTTP(w)
 		w.Write([]byte(protocol.BuildSSEEvent("response.completed", map[string]any{
 			"type": "response.completed",
 			"response": map[string]any{
@@ -385,38 +407,88 @@ func streamResponses(w http.ResponseWriter, chatReq map[string]any, model, sessi
 func extractSessionID(data map[string]any) string {
 	// 1. 优先使用 metadata 中的会话 ID
 	if meta, ok := data["metadata"].(map[string]any); ok {
+		// 常见字段优先
 		if id, _ := meta["conversation_id"].(string); id != "" {
 			return id
 		}
 		if id, _ := meta["session_id"].(string); id != "" {
 			return id
 		}
+		if id, _ := meta["thread_id"].(string); id != "" {
+			return id
+		}
+		if id, _ := meta["conversationId"].(string); id != "" {
+			return id
+		}
+		if id, _ := meta["sessionId"].(string); id != "" {
+			return id
+		}
+		if id, _ := meta["codex_session_id"].(string); id != "" {
+			return id
+		}
+		if id, _ := meta["codex_conversation_id"].(string); id != "" {
+			return id
+		}
 	}
-	// 2. 从 input 第一条消息提取稳定标识
+	// 1.1 顶层字段兜底（部分客户端不放 metadata）
+	if id, _ := data["conversation_id"].(string); id != "" {
+		return id
+	}
+	if id, _ := data["session_id"].(string); id != "" {
+		return id
+	}
+
+	// 2. JinDX 同款策略：用 instructions 的 hash + 第一条 user 消息 生成稳定会话 key
+	instructions, _ := data["instructions"].(string)
+	instHash := ""
+	if instructions != "" {
+		h := sha256.Sum256([]byte(instructions))
+		instHash = fmt.Sprintf("%x", h[:4]) // 8 hex
+	}
+
+	firstUser := ""
 	if input, ok := data["input"].([]any); ok && len(input) > 0 {
-		if first, ok := input[0].(map[string]any); ok {
-			// 尝试 string content
-			if content, ok := first["content"].(string); ok && content != "" {
-				h := sha256.Sum256([]byte(content))
-				return fmt.Sprintf("hash_%x", h[:8])
+		for _, item := range input {
+			it, ok := item.(map[string]any)
+			if !ok {
+				continue
 			}
-			// 尝试数组 content（取第一个 text 部分）
-			if contentArr, ok := first["content"].([]any); ok && len(contentArr) > 0 {
-				if part, ok := contentArr[0].(map[string]any); ok {
-					if text, ok := part["text"].(string); ok && text != "" {
-						h := sha256.Sum256([]byte(text))
-						return fmt.Sprintf("hash_%x", h[:8])
+			role, _ := it["role"].(string)
+			typ, _ := it["type"].(string)
+			if role == "user" || (typ == "message" && it["role"] == "user") {
+				content := it["content"]
+				switch c := content.(type) {
+				case string:
+					firstUser = c
+				case []any:
+					if b, err := json.Marshal(c); err == nil {
+						firstUser = string(b)
 					}
+				default:
+					if b, err := json.Marshal(c); err == nil {
+						firstUser = string(b)
+					}
+				}
+				if firstUser != "" {
+					break
 				}
 			}
 		}
+	} else if s, ok := data["input"].(string); ok && s != "" {
+		firstUser = s
 	}
+
+	if instHash != "" || firstUser != "" {
+		seed := instHash + "||" + firstUser
+		if len(seed) > 1000 {
+			seed = seed[:1000]
+		}
+		h := sha256.Sum256([]byte(seed))
+		return fmt.Sprintf("%x", h[:8]) // 16 hex
+	}
+
 	// 3. 最后兜底
 	return generateID()
-}
-
-func newReasoningCache() *cache.MemCache {
-	return cache.NewMemCache()
 }
 
 func isFirstResponseRound(data map[string]any) bool {
@@ -455,9 +527,12 @@ func cacheReasoning(source, sessionID string, resp *deepseek.ChatResponse) {
 		return
 	}
 	if len(resp.Choices) > 0 && resp.Choices[0].Message.ReasoningContent != "" {
-		ttl := parseTTL(config.Global.GetString("reasoning_cache_ttl"))
-		reasoningCache.Set(source, sessionID, resp.Choices[0].Message.ReasoningContent, ttl)
+		reasoningCache.Set(source, sessionID, resp.Choices[0].Message.ReasoningContent, reasoningCacheTTL())
 	}
+}
+
+func reasoningCacheTTL() time.Duration {
+	return parseTTL(config.Global.GetString("reasoning_cache_ttl"))
 }
 
 func parseTTL(s string) time.Duration {
@@ -489,4 +564,19 @@ func buildOutputContent(reasoning, text string) []map[string]any {
 		})
 	}
 	return content
+}
+
+// contentStringLen 返回消息内容的字符串长度（兼容 any 类型）
+func contentStringLen(content any) int {
+	switch c := content.(type) {
+	case string:
+		return len(c)
+	case []protocol.ContentPart:
+		var total int
+		for _, p := range c {
+			total += len(p.Text)
+		}
+		return total
+	}
+	return 0
 }

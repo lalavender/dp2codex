@@ -60,7 +60,17 @@ func extractItems(items []any) []ChatMessage {
 							parts = append(parts, ContentPart{Type: partType, Text: text})
 						}
 					}
-					msg.Content = parts
+					// DeepSeek 要求 assistant 消息的 content 为字符串（尤其是 thinking 模式）
+					// 将多个文本部分拼接为单个字符串
+					if msg.Role == "assistant" {
+						var sb strings.Builder
+						for _, p := range parts {
+							sb.WriteString(p.Text)
+						}
+						msg.Content = sb.String()
+					} else {
+						msg.Content = parts
+					}
 					msg.ReasoningContent = reasoningText
 				}
 			}
@@ -148,11 +158,15 @@ func FixToolMessageOrdering(messages []ChatMessage) []ChatMessage {
 
 // EnsureAssistantReasoning 确保 assistant 消息中包含 reasoning_content
 // 优先级：消息自身的 ReasoningContent > Content parts 中的 reasoning_text > 缓存值
-func EnsureAssistantReasoning(messages []ChatMessage, cachedReasoning string) []ChatMessage {
+// 逐个匹配 —— 每个缺失的 assistant 按顺序消费缓存中的一条 reasoning，不跳过。
+func EnsureAssistantReasoning(messages []ChatMessage, cachedReasoning []string) []ChatMessage {
+	cacheIdx := 0
+
 	for i := range messages {
 		if messages[i].Role != "assistant" {
 			continue
 		}
+
 		// 1. 尝试从 Content parts 中提取 reasoning_text
 		if messages[i].ReasoningContent == "" {
 			if parts, ok := messages[i].Content.([]ContentPart); ok {
@@ -164,11 +178,14 @@ func EnsureAssistantReasoning(messages []ChatMessage, cachedReasoning string) []
 				}
 			}
 		}
-		// 2. 如果仍然为空，使用缓存的 reasoning
-		if messages[i].ReasoningContent == "" && cachedReasoning != "" {
-			messages[i].ReasoningContent = cachedReasoning
+
+		// 2. 仍然没有 reasoning → 从缓存按序回填
+		if messages[i].ReasoningContent == "" && cacheIdx < len(cachedReasoning) {
+			messages[i].ReasoningContent = cachedReasoning[cacheIdx]
+			cacheIdx++
 		}
 	}
+
 	return messages
 }
 
@@ -315,7 +332,7 @@ func LogMessagesDebug(label string, messages []ChatMessage) {
 }
 
 // ResponsesToChat 将 OpenAI Responses API 请求转换为 DeepSeek Chat 格式
-func ResponsesToChat(data map[string]any, cachedReasoning string, isFirstRound bool) map[string]any {
+func ResponsesToChat(data map[string]any, cachedReasoning []string, isFirstRound bool) map[string]any {
 	messages := ExtractMessageItems(data["input"])
 	if len(messages) == 0 {
 		slog.Warn("ResponsesToChat: no messages extracted from input")
@@ -337,7 +354,7 @@ func ResponsesToChat(data map[string]any, cachedReasoning string, isFirstRound b
 	}
 
 	// 注入缓存的 reasoning_content
-	if cachedReasoning != "" {
+	if len(cachedReasoning) > 0 {
 		messages = EnsureAssistantReasoning(messages, cachedReasoning)
 	}
 

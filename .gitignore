@@ -1,6 +1,6 @@
 .claude
-/start.sh
-certs/
 /dp2codex
 *.log
 /tmp/
+
+.env

@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"dp2codex/internal/config"
@@ -37,10 +39,49 @@ func since(t time.Time) float64 {
 	return time.Since(t).Seconds()
 }
 
-func newDSClient(source string) *deepseek.Client {
+func newDSClient(r *http.Request, source string) *deepseek.Client {
 	baseURL := config.Global.GetString("deepseek_base")
 	apiKey := config.Global.GetString("deepseek_key")
+	authSource := "startup_key"
+	if r != nil {
+		if key, source := extractRequestAPIKey(r); key != "" {
+			apiKey = key
+			authSource = source
+		} else if apiKey == "" {
+			authSource = "missing"
+		}
+	} else if apiKey == "" {
+		authSource = "missing"
+	}
+	slog.Debug("resolved upstream auth", "source", source, "auth_source", authSource)
 	return deepseek.NewClient(baseURL, apiKey)
+}
+
+func extractBearerToken(auth string) string {
+	auth = strings.TrimSpace(auth)
+	if auth == "" {
+		return ""
+	}
+	if len(auth) < 7 || !strings.EqualFold(auth[:7], "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(auth[7:])
+}
+
+func extractRequestAPIKey(r *http.Request) (string, string) {
+	if r == nil {
+		return "", ""
+	}
+	if bearer := extractBearerToken(r.Header.Get("Authorization")); bearer != "" {
+		return bearer, "authorization_bearer"
+	}
+	if key := strings.TrimSpace(r.Header.Get("api-key")); key != "" {
+		return key, "api-key"
+	}
+	if key := strings.TrimSpace(r.Header.Get("x-api-key")); key != "" {
+		return key, "x-api-key"
+	}
+	return "", ""
 }
 
 func respToMap(resp *deepseek.ChatResponse) map[string]any {
